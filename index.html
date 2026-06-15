@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ระบบบัญชีเครดิต</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Sarabun', 'Noto Sans Thai', sans-serif; background: #f7f8fc; color: #1a1a2e; }
+    input, select, button { font-family: inherit; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useMemo, useEffect } = React;
+
+    // ---- CONSTANTS ----
+    const CREDIT_TYPES = [
+      { value: "bad_debt",     label: "เครดิตเสีย",              color: "#ef4444" },
+      { value: "loan",         label: "เครดิตเงินกู้",            color: "#f97316" },
+      { value: "scan_outside", label: "สแกนของนอกร้าน",           color: "#8b5cf6" },
+      { value: "in_store",     label: "ซื้อของร้าน (ราคาเครดิต)", color: "#3b82f6" },
+    ];
+    const MONTHS_TH = ["ม.ค.","ก.พ.","มี.ค.","เม.ย.","พ.ค.","มิ.ย.","ก.ค.","ส.ค.","ก.ย.","ต.ค.","พ.ย.","ธ.ค."];
+
+    function genId() { return Math.random().toString(36).slice(2, 9); }
+
+    function calcDebtSplit(debt) {
+      const profitRatio = (debt.creditPrice - debt.principal) / debt.creditPrice;
+      return { profitRatio, capitalRatio: 1 - profitRatio };
+    }
+    function getMonthKey(dateStr) {
+      const d = new Date(dateStr);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+    }
+    function monthLabel(key) {
+      const [y, m] = key.split("-");
+      return `${MONTHS_TH[parseInt(m)-1]} ${parseInt(y)+543}`;
+    }
+
+    // ---- localStorage ----
+    function save(key, value) {
+      try { localStorage.setItem("credit_" + key, JSON.stringify(value)); } catch(_) {}
+    }
+    function load(key, fallback) {
+      try {
+        const raw = localStorage.getItem("credit_" + key);
+        return raw ? JSON.parse(raw) : fallback;
+      } catch(_) { return fallback; }
+    }
+
+    // ---- SMALL COMPONENTS ----
+    function Tag({ type }) {
+      const t = CREDIT_TYPES.find(x => x.value === type);
+      return (
+        <span style={{ background: (t?.color||"#888")+"22", color: t?.color||"#888",
+          border: `1px solid ${t?.color||"#888"}44`, borderRadius: 6,
+          padding: "2px 8px", fontSize: 11, fontWeight: 600, whiteSpace: "nowrap" }}>
+          {t?.label || type}
+        </span>
+      );
+    }
+
+    function Modal({ title, onClose, children }) {
+      return (
+        <div style={{ position:"fixed", inset:0, background:"#0009", zIndex:1000,
+            display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+          <div style={{ background:"#fff", borderRadius:16, width:"100%", maxWidth:480,
+              maxHeight:"90vh", overflowY:"auto", boxShadow:"0 8px 40px #0004" }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
+                padding:"18px 20px 12px", borderBottom:"1px solid #f0f0f0" }}>
+              <span style={{ fontWeight:700, fontSize:16, color:"#1a1a2e" }}>{title}</span>
+              <button onClick={onClose} style={{ background:"none", border:"none", fontSize:20, cursor:"pointer", color:"#888" }}>✕</button>
+            </div>
+            <div style={{ padding:"16px 20px 20px" }}>{children}</div>
+          </div>
+        </div>
+      );
+    }
+
+    function InputRow({ label, children }) {
+      return (
+        <div style={{ marginBottom:12 }}>
+          <label style={{ display:"block", fontSize:12, color:"#666", marginBottom:4, fontWeight:600 }}>{label}</label>
+          {children}
+        </div>
+      );
+    }
+
+    const iStyle = { width:"100%", padding:"8px 10px", border:"1.5px solid #e5e7eb",
+      borderRadius:8, fontSize:14, boxSizing:"border-box", outline:"none" };
+
+    function Card({ label, value, sub, color }) {
+      return (
+        <div style={{ background:"#fff", borderRadius:12, padding:14, boxShadow:"0 1px 4px #0001" }}>
+          <div style={{ fontSize:11, color:"#888", marginBottom:4 }}>{label}</div>
+          <div style={{ fontSize:20, fontWeight:800, color }}>{value}</div>
+          {sub && <div style={{ fontSize:11, color:"#aaa", marginTop:2 }}>{sub}</div>}
+        </div>
+      );
+    }
+
+    function MiniCard({ label, value, note, color }) {
+      return (
+        <div style={{ background:color+"0d", borderRadius:8, padding:"8px 10px", border:`1px solid ${color}22` }}>
+          <div style={{ fontSize:10, color:"#888" }}>{label}</div>
+          <div style={{ fontSize:14, fontWeight:700, color }}>{value}</div>
+          {note && <div style={{ fontSize:10, color:"#aaa" }}>{note}</div>}
+        </div>
+      );
+    }
+
+    function EmptyState({ text }) {
+      return <div style={{ textAlign:"center", color:"#aaa", padding:"40px 0", fontSize:14 }}>{text}</div>;
+    }
+
+    // ============================
+    // MAIN APP
+    // ============================
+    function App() {
+      const [tab, setTab]           = useState("dashboard");
+      const [customers, setCustomers] = useState(() => load("customers", []));
+      const [debts, setDebts]         = useState(() => load("debts", []));
+      const [payments, setPayments]   = useState(() => load("payments", []));
+
+      const [showAddCustomer, setShowAddCustomer] = useState(false);
+      const [showAddDebt,     setShowAddDebt]     = useState(false);
+      const [showAddPayment,  setShowAddPayment]  = useState(null);
+      const [selectedDebt,    setSelectedDebt]    = useState(null);
+      const [confirmDelete,   setConfirmDelete]   = useState(null);
+
+      const [custForm, setCustForm] = useState({ name:"", phone:"" });
+      const [debtForm, setDebtForm] = useState({
+        customerId:"", creditType:"bad_debt", principal:"",
+        creditPrice:"", totalInstallments:"", startDate:"", note:""
+      });
+      const [payForm, setPayForm] = useState({
+        date: new Date().toISOString().slice(0,10), amount:"", note:""
+      });
+
+      // Auto-save
+      useEffect(() => { save("customers", customers); }, [customers]);
+      useEffect(() => { save("debts",     debts);     }, [debts]);
+      useEffect(() => { save("payments",  payments);  }, [payments]);
+
+      // ---- Derived ----
+      const debtMap    = useMemo(() => Object.fromEntries(debts.map(d => [d.id, d])),     [debts]);
+      const customerMap = useMemo(() => Object.fromEntries(customers.map(c => [c.id, c])), [customers]);
+
+      const debtStats = useMemo(() => {
+        const stats = {};
+        debts.forEach(d => {
+          const { profitRatio, capitalRatio } = calcDebtSplit(d);
+          const ps = payments.filter(p => p.debtId === d.id);
+          const totalPaid = ps.reduce((s,p) => s + p.amount, 0);
+          stats[d.id] = {
+            totalPaid,
+            capitalReturned:  totalPaid * capitalRatio,
+            profitCollected:  totalPaid * profitRatio,
+            remaining:        d.creditPrice - totalPaid,
+            profitRatio, capitalRatio,
+            installmentAmt:   d.creditPrice / d.totalInstallments,
+          };
+        });
+        return stats;
+      }, [debts, payments]);
+
+      const monthlySummary = useMemo(() => {
+        const map = {};
+        payments.forEach(p => {
+          const d = debtMap[p.debtId]; if (!d) return;
+          const { profitRatio, capitalRatio } = calcDebtSplit(d);
+          const mk = getMonthKey(p.date);
+          if (!map[mk]) map[mk] = { income:0, capital:0, profit:0, payments:[] };
+          map[mk].income  += p.amount;
+          map[mk].capital += p.amount * capitalRatio;
+          map[mk].profit  += p.amount * profitRatio;
+          map[mk].payments.push(p);
+        });
+        return Object.entries(map)
+          .sort((a,b) => a[0].localeCompare(b[0]))
+          .map(([k,v]) => ({ key:k, label:monthLabel(k), ...v }));
+      }, [payments, debtMap]);
+
+      const totalCapitalOut      = useMemo(() => debts.reduce((s,d) => s + d.principal, 0), [debts]);
+      const totalCapitalReturned = useMemo(() => Object.values(debtStats).reduce((s,v) => s + v.capitalReturned, 0), [debtStats]);
+      const totalProfit          = useMemo(() => Object.values(debtStats).reduce((s,v) => s + v.profitCollected, 0), [debtStats]);
+      const totalOutstanding     = useMemo(() => Object.values(debtStats).reduce((s,v) => s + Math.max(0, v.remaining), 0), [debtStats]);
+
+      // ---- Handlers ----
+      function addCustomer() {
+        if (!custForm.name.trim()) return;
+        setCustomers(prev => [...prev, { id:genId(), ...custForm }]);
+        setCustForm({ name:"", phone:"" });
+        setShowAddCustomer(false);
+      }
+
+      function addDebt() {
+        const missing = [];
+        if (!debtForm.customerId)                              missing.push("ลูกค้า");
+        if (!debtForm.principal      || +debtForm.principal      <= 0) missing.push("ยอดทุน");
+        if (!debtForm.creditPrice    || +debtForm.creditPrice    <= 0) missing.push("ยอดเครดิต");
+        if (!debtForm.totalInstallments || +debtForm.totalInstallments <= 0) missing.push("จำนวนงวด");
+        if (missing.length > 0) { alert("กรุณากรอก: " + missing.join(", ")); return; }
+        setDebts(prev => [...prev, {
+          id: genId(),
+          customerId:        debtForm.customerId,
+          creditType:        debtForm.creditType,
+          principal:         +debtForm.principal,
+          creditPrice:       +debtForm.creditPrice,
+          totalInstallments: +debtForm.totalInstallments,
+          startDate:         debtForm.startDate || new Date().toISOString().slice(0,10),
+          note:              debtForm.note,
+        }]);
+        setDebtForm({ customerId:"", creditType:"bad_debt", principal:"", creditPrice:"", totalInstallments:"", startDate:"", note:"" });
+        setShowAddDebt(false);
+      }
+
+      function addPayment() {
+        if (!payForm.date || !payForm.amount) return;
+        setPayments(prev => [...prev, { id:genId(), debtId:showAddPayment, ...payForm, amount:+payForm.amount }]);
+        setPayForm({ date:new Date().toISOString().slice(0,10), amount:"", note:"" });
+        setShowAddPayment(null);
+      }
+
+      function deleteCustomer(customerId) {
+        const debtIds = debts.filter(d => d.customerId === customerId).map(d => d.id);
+        setPayments(prev => prev.filter(p => !debtIds.includes(p.debtId)));
+        setDebts(prev    => prev.filter(d => d.customerId !== customerId));
+        setCustomers(prev => prev.filter(c => c.id !== customerId));
+        setConfirmDelete(null);
+      }
+
+      function exportData() {
+        const data = { customers, debts, payments, exportedAt: new Date().toISOString() };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type:"application/json" });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement("a");
+        a.href     = url;
+        a.download = "บัญชีเครดิต_" + new Date().toLocaleDateString("th-TH").replace(/\//g,"-") + ".json";
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      function importData(e) {
+        const file = e.target.files[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = ev => {
+          try {
+            const data = JSON.parse(ev.target.result);
+            if (data.customers) setCustomers(data.customers);
+            if (data.debts)     setDebts(data.debts);
+            if (data.payments)  setPayments(data.payments);
+            alert("นำเข้าข้อมูลสำเร็จ ✅");
+          } catch { alert("ไฟล์ไม่ถูกต้อง"); }
+        };
+        reader.readAsText(file);
+        e.target.value = "";
+      }
+
+      const tabs = [
+        { key:"dashboard", label:"📊 ภาพรวม"  },
+        { key:"monthly",   label:"📅 รายเดือน" },
+        { key:"debts",     label:"📋 ลูกหนี้"  },
+        { key:"customers", label:"👤 ลูกค้า"   },
+      ];
+
+      return (
+        <div style={{ minHeight:"100vh" }}>
+          {/* Header */}
+          <div style={{ background:"linear-gradient(135deg,#1a1a2e 0%,#16213e 100%)", padding:"20px 20px 0", color:"#fff" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+              <div>
+                <div style={{ fontSize:20, fontWeight:800 }}>💰 ระบบบัญชีเครดิต</div>
+                <div style={{ fontSize:12, color:"#94a3b8", marginTop:2 }}>แยกทุน–กำไร ชัดเจนทุกบาท</div>
+              </div>
+              <div style={{ display:"flex", gap:6 }}>
+                <label style={{ background:"#ffffff22", color:"#fff", border:"1px solid #ffffff44",
+                    borderRadius:7, padding:"5px 10px", fontSize:11, fontWeight:600, cursor:"pointer" }}>
+                  📂 นำเข้า
+                  <input type="file" accept=".json" onChange={importData} style={{ display:"none" }} />
+                </label>
+                <button onClick={exportData} style={{ background:"#ffffff22", color:"#fff",
+                    border:"1px solid #ffffff44", borderRadius:7, padding:"5px 10px",
+                    fontSize:11, fontWeight:600, cursor:"pointer" }}>
+                  💾 สำรองข้อมูล
+                </button>
+              </div>
+            </div>
+            <div style={{ display:"flex", gap:4, marginTop:16 }}>
+              {tabs.map(t => (
+                <button key={t.key} onClick={() => setTab(t.key)} style={{
+                    background: tab===t.key ? "#fff" : "transparent",
+                    color: tab===t.key ? "#1a1a2e" : "#94a3b8",
+                    border:"none", borderRadius:"8px 8px 0 0",
+                    padding:"8px 14px", fontSize:12,
+                    fontWeight: tab===t.key ? 700 : 400, cursor:"pointer" }}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ padding:16, maxWidth:700, margin:"0 auto" }}>
+
+            {/* ===== DASHBOARD ===== */}
+            {tab === "dashboard" && (
+              <>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginTop:4 }}>
+                  <Card label="💸 ทุนที่ปล่อยออกไป"  value={`฿${totalCapitalOut.toLocaleString()}`}
+                    sub="ทั้งหมด" color="#3b82f6" />
+                  <Card label="🔄 ทุนที่คืนกลับมา"  value={`฿${Math.round(totalCapitalReturned).toLocaleString()}`}
+                    sub={`${totalCapitalOut>0 ? Math.round(totalCapitalReturned/totalCapitalOut*100) : 0}% กลับมาแล้ว`} color="#10b981" />
+                  <Card label="🟢 กำไรสะสม"          value={`฿${Math.round(totalProfit).toLocaleString()}`}
+                    sub="จากดอกเบี้ย/บวกราคา" color="#f59e0b" />
+                  <Card label="⏳ ยอดค้างรับ"         value={`฿${Math.round(totalOutstanding).toLocaleString()}`}
+                    sub="รวมทุก account" color="#ef4444" />
+                </div>
+
+                {customers.length === 0 && (
+                  <div style={{ background:"#eff6ff", border:"1px solid #bfdbfe", borderRadius:12,
+                      padding:16, marginTop:12, textAlign:"center", fontSize:13, color:"#1e40af" }}>
+                    👋 เริ่มต้นด้วยการ <strong>เพิ่มลูกค้า</strong> ที่แท็บ "ลูกค้า" แล้วเพิ่มบัญชีเครดิตได้เลย
+                  </div>
+                )}
+
+                <div style={{ background:"#fff", borderRadius:12, padding:16, marginTop:12, boxShadow:"0 1px 4px #0001" }}>
+                  <div style={{ fontWeight:700, marginBottom:12, fontSize:14 }}>💡 วิธีอ่านตัวเลข</div>
+                  {[
+                    ["ทุนที่ปล่อยออกไป", "เงินต้นจริงที่คุณจ่ายออกไป ไม่ใช่กำไร"],
+                    ["ทุนที่คืนกลับมา",  "ส่วนของเงินสดรับที่เป็น 'คืนทุน' — ใช้หมุนได้"],
+                    ["กำไรสะสม",         "ส่วนต่างราคาเครดิต-ราคาทุน ที่เก็บมาได้แล้ว"],
+                    ["ยอดค้างรับ",        "สิ่งที่ลูกค้ายังต้องจ่ายให้เรา (ทุน+กำไรรวมกัน)"],
+                  ].map(([k,v]) => (
+                    <div key={k} style={{ display:"flex", gap:8, marginBottom:6, fontSize:13 }}>
+                      <span style={{ color:"#3b82f6", fontWeight:700, minWidth:140 }}>{k}</span>
+                      <span style={{ color:"#666" }}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {debts.length > 0 && (
+                  <div style={{ background:"#fff", borderRadius:12, padding:16, marginTop:12, boxShadow:"0 1px 4px #0001" }}>
+                    <div style={{ fontWeight:700, marginBottom:10, fontSize:14 }}>📊 สัดส่วนแต่ละประเภทเครดิต</div>
+                    {CREDIT_TYPES.map(ct => {
+                      const ctDebts   = debts.filter(d => d.creditType === ct.value);
+                      const ctCapital = ctDebts.reduce((s,d) => s + d.principal, 0);
+                      const ctProfit  = ctDebts.reduce((s,d) => s + (debtStats[d.id]?.profitCollected||0), 0);
+                      if (ctCapital === 0) return null;
+                      return (
+                        <div key={ct.value} style={{ display:"flex", alignItems:"center", gap:10, marginBottom:8 }}>
+                          <Tag type={ct.value} />
+                          <div style={{ flex:1 }}>
+                            <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:2 }}>
+                              <span>ทุน ฿{ctCapital.toLocaleString()}</span>
+                              <span style={{ color:"#10b981" }}>กำไร ฿{Math.round(ctProfit).toLocaleString()}</span>
+                            </div>
+                            <div style={{ background:"#f0f0f0", borderRadius:4, height:6 }}>
+                              <div style={{ background:ct.color, borderRadius:4, height:6,
+                                  width:`${Math.min(100,(ctProfit/(ctCapital*0.3||1))*100)}%` }} />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* ===== MONTHLY ===== */}
+            {tab === "monthly" && (
+              <>
+                <div style={{ fontWeight:700, fontSize:15, margin:"8px 0 12px" }}>📅 สรุปรายเดือน</div>
+                {monthlySummary.length === 0 && <EmptyState text="ยังไม่มีข้อมูลการรับเงิน" />}
+                {monthlySummary.map(m => (
+                  <div key={m.key} style={{ background:"#fff", borderRadius:12, padding:16, marginBottom:10, boxShadow:"0 1px 4px #0001" }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+                      <span style={{ fontWeight:700, fontSize:15 }}>{m.label}</span>
+                      <span style={{ fontWeight:800, fontSize:16 }}>฿{Math.round(m.income).toLocaleString()}</span>
+                    </div>
+                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                      <MiniCard label="🔵 ทุนคืน" value={`฿${Math.round(m.capital).toLocaleString()}`} note="นำไปหมุนได้" color="#3b82f6" />
+                      <MiniCard label="🟡 กำไร"   value={`฿${Math.round(m.profit).toLocaleString()}`}  note="รายได้จริง"  color="#f59e0b" />
+                    </div>
+                    <div style={{ marginTop:10, borderTop:"1px solid #f0f0f0", paddingTop:8 }}>
+                      {m.payments.map(p => {
+                        const d = debtMap[p.debtId]; if (!d) return null;
+                        const { profitRatio, capitalRatio } = calcDebtSplit(d);
+                        const c = customerMap[d.customerId];
+                        return (
+                          <div key={p.id} style={{ display:"flex", justifyContent:"space-between",
+                              fontSize:12, padding:"3px 0", borderBottom:"1px solid #f7f7f7" }}>
+                            <span style={{ color:"#444" }}>{c?.name||"-"} <Tag type={d.creditType} /></span>
+                            <span>
+                              <span style={{ color:"#3b82f6" }}>฿{Math.round(p.amount*capitalRatio).toLocaleString()}</span>
+                              {" + "}
+                              <span style={{ color:"#f59e0b" }}>฿{Math.round(p.amount*profitRatio).toLocaleString()}</span>
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
+
+            {/* ===== DEBTS ===== */}
+            {tab === "debts" && (
+              <>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", margin:"8px 0 12px" }}>
+                  <span style={{ fontWeight:700, fontSize:15 }}>📋 บัญชีลูกหนี้</span>
+                  <button onClick={() => setShowAddDebt(true)} style={{ background:"#1a1a2e", color:"#fff",
+                      border:"none", borderRadius:8, padding:"7px 14px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+                    + เพิ่มบัญชี
+                  </button>
+                </div>
+                {debts.length === 0 && <EmptyState text="ยังไม่มีบัญชีลูกหนี้" />}
+                {debts.map(d => {
+                  const s   = debtStats[d.id];
+                  const c   = customerMap[d.customerId];
+                  const pct = Math.min(100, Math.round((s.totalPaid/d.creditPrice)*100));
+                  return (
+                    <div key={d.id} style={{ background:"#fff", borderRadius:12, padding:16, marginBottom:10,
+                        boxShadow:"0 1px 4px #0001", cursor:"pointer" }}
+                      onClick={() => setSelectedDebt(selectedDebt===d.id ? null : d.id)}>
+                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+                        <div>
+                          <div style={{ fontWeight:700, fontSize:14 }}>{c?.name||"ไม่ระบุ"}</div>
+                          <div style={{ marginTop:3 }}><Tag type={d.creditType} /></div>
+                        </div>
+                        <div style={{ textAlign:"right" }}>
+                          <div style={{ fontSize:13, color:"#ef4444", fontWeight:700 }}>
+                            ค้าง ฿{Math.round(Math.max(0,s.remaining)).toLocaleString()}
+                          </div>
+                          <div style={{ fontSize:11, color:"#888" }}>จากทั้งหมด ฿{d.creditPrice.toLocaleString()}</div>
+                        </div>
+                      </div>
+                      <div style={{ marginTop:10, background:"#f0f0f0", borderRadius:6, height:8 }}>
+                        <div style={{ background:"linear-gradient(90deg,#3b82f6,#10b981)", borderRadius:6, height:8, width:`${pct}%` }} />
+                      </div>
+                      <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"#888", marginTop:4 }}>
+                        <span>ชำระแล้ว {pct}%</span>
+                        <span>งวดละ ฿{Math.round(s.installmentAmt).toLocaleString()} × {d.totalInstallments}</span>
+                      </div>
+
+                      {selectedDebt === d.id && (
+                        <div style={{ marginTop:12, borderTop:"1px solid #f0f0f0", paddingTop:12 }}>
+                          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:10 }}>
+                            <MiniCard label="ทุนที่ปล่อย"  value={`฿${d.principal.toLocaleString()}`}                       color="#3b82f6" />
+                            <MiniCard label="ทุนคืนมา"     value={`฿${Math.round(s.capitalReturned).toLocaleString()}`}      color="#10b981" />
+                            <MiniCard label="กำไร"          value={`฿${Math.round(s.profitCollected).toLocaleString()}`}      color="#f59e0b" />
+                          </div>
+                          <div style={{ fontSize:12, color:"#555", marginBottom:8 }}>
+                            อัตรากำไร {Math.round(s.profitRatio*100)}% | ทุน {Math.round(s.capitalRatio*100)}% ต่อยอด
+                          </div>
+                          <div style={{ fontWeight:600, fontSize:12, marginBottom:6 }}>ประวัติการชำระ</div>
+                          {payments.filter(p => p.debtId===d.id).map(p => (
+                            <div key={p.id} style={{ display:"flex", justifyContent:"space-between",
+                                fontSize:12, padding:"3px 0", borderBottom:"1px solid #f7f7f7" }}>
+                              <span style={{ color:"#666" }}>{p.date} {p.note && `(${p.note})`}</span>
+                              <span style={{ fontWeight:600 }}>
+                                ฿{p.amount.toLocaleString()}{" "}
+                                <span style={{ color:"#3b82f6" }}>T:฿{Math.round(p.amount*s.capitalRatio).toLocaleString()}</span>{" "}
+                                <span style={{ color:"#f59e0b" }}>G:฿{Math.round(p.amount*s.profitRatio).toLocaleString()}</span>
+                              </span>
+                            </div>
+                          ))}
+                          {payments.filter(p => p.debtId===d.id).length===0 &&
+                            <div style={{ fontSize:12, color:"#aaa" }}>ยังไม่มีการชำระ</div>}
+                          <button onClick={e => { e.stopPropagation(); setShowAddPayment(d.id); }}
+                            style={{ marginTop:10, background:"#10b981", color:"#fff", border:"none",
+                              borderRadius:8, padding:"7px 14px", fontSize:12, fontWeight:600,
+                              cursor:"pointer", width:"100%" }}>
+                            + บันทึกรับเงิน
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </>
+            )}
+
+            {/* ===== CUSTOMERS ===== */}
+            {tab === "customers" && (
+              <>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", margin:"8px 0 12px" }}>
+                  <span style={{ fontWeight:700, fontSize:15 }}>👤 รายชื่อลูกค้า</span>
+                  <button onClick={() => setShowAddCustomer(true)} style={{ background:"#1a1a2e", color:"#fff",
+                      border:"none", borderRadius:8, padding:"7px 14px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
+                    + เพิ่มลูกค้า
+                  </button>
+                </div>
+                {customers.length === 0 && <EmptyState text="ยังไม่มีลูกค้า กด + เพิ่มลูกค้าได้เลย" />}
+                {customers.map(c => {
+                  const cDebts      = debts.filter(d => d.customerId===c.id);
+                  const cOutstanding = cDebts.reduce((s,d) => s + Math.max(0, debtStats[d.id]?.remaining||0), 0);
+                  const isPaid      = cOutstanding < 1;
+                  return (
+                    <div key={c.id} style={{ background:"#fff", borderRadius:12, padding:14, marginBottom:8,
+                        boxShadow:"0 1px 4px #0001", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                      <div>
+                        <div style={{ fontWeight:700, fontSize:14 }}>{c.name}</div>
+                        <div style={{ fontSize:12, color:"#888" }}>{c.phone} · {cDebts.length} บัญชี</div>
+                      </div>
+                      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                        <div style={{ fontSize:13, color:isPaid?"#10b981":"#ef4444", fontWeight:700 }}>
+                          {isPaid ? "✅ ชำระครบ" : `ค้าง ฿${Math.round(cOutstanding).toLocaleString()}`}
+                        </div>
+                        <button onClick={() => setConfirmDelete(c.id)} style={{ background:"#fee2e2", color:"#ef4444",
+                            border:"none", borderRadius:6, padding:"5px 10px", fontSize:12, fontWeight:600, cursor:"pointer" }}>
+                          ลบ
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            )}
+          </div>
+
+          {/* ===== MODALS ===== */}
+          {showAddCustomer && (
+            <Modal title="เพิ่มลูกค้าใหม่" onClose={() => setShowAddCustomer(false)}>
+              <InputRow label="ชื่อลูกค้า *">
+                <input style={iStyle} value={custForm.name} placeholder="สมชาย ใจดี"
+                  onChange={e => setCustForm(f => ({...f, name:e.target.value}))} />
+              </InputRow>
+              <InputRow label="เบอร์โทร">
+                <input style={iStyle} value={custForm.phone} placeholder="08x-xxx-xxxx"
+                  onChange={e => setCustForm(f => ({...f, phone:e.target.value}))} />
+              </InputRow>
+              <button onClick={addCustomer} style={{ width:"100%", background:"#1a1a2e", color:"#fff",
+                  border:"none", borderRadius:10, padding:11, fontSize:14, fontWeight:700, cursor:"pointer", marginTop:4 }}>
+                บันทึก
+              </button>
+            </Modal>
+          )}
+
+          {showAddDebt && (
+            <Modal title="เพิ่มบัญชีเครดิตใหม่" onClose={() => setShowAddDebt(false)}>
+              <InputRow label="ลูกค้า *">
+                <select style={iStyle} value={debtForm.customerId}
+                  onChange={e => setDebtForm(f => ({...f, customerId:e.target.value}))}>
+                  <option value="">-- เลือกลูกค้า --</option>
+                  {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </InputRow>
+              <InputRow label="ประเภทเครดิต *">
+                <select style={iStyle} value={debtForm.creditType}
+                  onChange={e => setDebtForm(f => ({...f, creditType:e.target.value}))}>
+                  {CREDIT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                </select>
+              </InputRow>
+              <InputRow label="ยอดทุน (เงินต้นจริงที่จ่ายออก) *">
+                <input type="number" style={iStyle} value={debtForm.principal} placeholder="เช่น 5000"
+                  onChange={e => setDebtForm(f => ({...f, principal:e.target.value}))} />
+              </InputRow>
+              <InputRow label="ยอดเครดิต (ราคาที่ลูกค้าต้องจ่ายรวม) *">
+                <input type="number" style={iStyle} value={debtForm.creditPrice} placeholder="เช่น 6500"
+                  onChange={e => setDebtForm(f => ({...f, creditPrice:e.target.value}))} />
+              </InputRow>
+              {debtForm.principal && debtForm.creditPrice && +debtForm.creditPrice > +debtForm.principal && (
+                <div style={{ background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:8,
+                    padding:"8px 12px", fontSize:12, color:"#166534", marginBottom:8 }}>
+                  💡 กำไร = ฿{(+debtForm.creditPrice - +debtForm.principal).toLocaleString()}{" "}
+                  ({Math.round(((+debtForm.creditPrice - +debtForm.principal) / +debtForm.creditPrice)*100)}% ของยอดรับ)
+                </div>
+              )}
+              <InputRow label="จำนวนงวด *">
+                <input type="number" style={iStyle} value={debtForm.totalInstallments} placeholder="เช่น 10"
+                  onChange={e => setDebtForm(f => ({...f, totalInstallments:e.target.value}))} />
+              </InputRow>
+              <InputRow label="วันเริ่มต้น">
+                <input type="date" style={iStyle} value={debtForm.startDate}
+                  onChange={e => setDebtForm(f => ({...f, startDate:e.target.value}))} />
+              </InputRow>
+              <InputRow label="หมายเหตุ">
+                <input style={iStyle} value={debtForm.note} placeholder="(ไม่บังคับ)"
+                  onChange={e => setDebtForm(f => ({...f, note:e.target.value}))} />
+              </InputRow>
+              <button onClick={addDebt} style={{ width:"100%", background:"#1a1a2e", color:"#fff",
+                  border:"none", borderRadius:10, padding:11, fontSize:14, fontWeight:700, cursor:"pointer", marginTop:4 }}>
+                บันทึก
+              </button>
+            </Modal>
+          )}
+
+          {showAddPayment && (() => {
+            const d = debtMap[showAddPayment];
+            const s = debtStats[showAddPayment];
+            return (
+              <Modal title="บันทึกรับเงิน" onClose={() => setShowAddPayment(null)}>
+                <div style={{ background:"#f8fafc", borderRadius:8, padding:10, marginBottom:12, fontSize:13 }}>
+                  <div style={{ fontWeight:700 }}>{customerMap[d.customerId]?.name}</div>
+                  <div style={{ color:"#555", marginTop:2 }}>
+                    ค้างชำระ ฿{Math.round(Math.max(0,s.remaining)).toLocaleString()} | งวดปกติ ฿{Math.round(s.installmentAmt).toLocaleString()}
+                  </div>
+                </div>
+                <InputRow label="วันที่รับเงิน *">
+                  <input type="date" style={iStyle} value={payForm.date}
+                    onChange={e => setPayForm(f => ({...f, date:e.target.value}))} />
+                </InputRow>
+                <InputRow label="จำนวนเงินที่รับ *">
+                  <input type="number" style={iStyle} value={payForm.amount} placeholder="เช่น 650"
+                    onChange={e => setPayForm(f => ({...f, amount:e.target.value}))} />
+                </InputRow>
+                {payForm.amount && +payForm.amount > 0 && (
+                  <div style={{ background:"#eff6ff", border:"1px solid #bfdbfe", borderRadius:8,
+                      padding:"8px 12px", fontSize:12, color:"#1e40af", marginBottom:8 }}>
+                    🔵 ทุนคืน ฿{Math.round(+payForm.amount*s.capitalRatio).toLocaleString()}&nbsp;|&nbsp;
+                    🟡 กำไร ฿{Math.round(+payForm.amount*s.profitRatio).toLocaleString()}
+                  </div>
+                )}
+                <InputRow label="หมายเหตุ">
+                  <input style={iStyle} value={payForm.note} placeholder="เช่น โอนเศษ, จ่ายสด"
+                    onChange={e => setPayForm(f => ({...f, note:e.target.value}))} />
+                </InputRow>
+                <button onClick={addPayment} style={{ width:"100%", background:"#10b981", color:"#fff",
+                    border:"none", borderRadius:10, padding:11, fontSize:14, fontWeight:700, cursor:"pointer", marginTop:4 }}>
+                  บันทึกรับเงิน
+                </button>
+              </Modal>
+            );
+          })()}
+
+          {confirmDelete && (() => {
+            const c = customerMap[confirmDelete];
+            const cDebts = debts.filter(d => d.customerId===confirmDelete);
+            const cOutstanding = cDebts.reduce((s,d) => s + Math.max(0,debtStats[d.id]?.remaining||0), 0);
+            const isPaid = cOutstanding < 1;
+            return (
+              <Modal title="⚠️ ยืนยันการลบ" onClose={() => setConfirmDelete(null)}>
+                <div style={{ textAlign:"center", padding:"8px 0 16px" }}>
+                  <div style={{ fontSize:40, marginBottom:8 }}>🗑️</div>
+                  <div style={{ fontWeight:700, fontSize:15, marginBottom:6 }}>{c?.name}</div>
+                  {!isPaid && (
+                    <div style={{ background:"#fef9c3", border:"1px solid #fde047", borderRadius:8,
+                        padding:"8px 12px", fontSize:13, color:"#854d0e", marginBottom:12 }}>
+                      ⚠️ ยังค้างชำระอยู่ <strong>฿{Math.round(cOutstanding).toLocaleString()}</strong>
+                    </div>
+                  )}
+                  <div style={{ fontSize:13, color:"#666", marginBottom:16 }}>
+                    ลบลูกค้ารายนี้จะลบบัญชีและประวัติการชำระทั้งหมดด้วย ไม่สามารถกู้คืนได้
+                  </div>
+                  <div style={{ display:"flex", gap:10 }}>
+                    <button onClick={() => setConfirmDelete(null)} style={{ flex:1, background:"#f3f4f6", color:"#444",
+                        border:"none", borderRadius:10, padding:11, fontSize:14, fontWeight:600, cursor:"pointer" }}>
+                      ยกเลิก
+                    </button>
+                    <button onClick={() => deleteCustomer(confirmDelete)} style={{ flex:1, background:"#ef4444", color:"#fff",
+                        border:"none", borderRadius:10, padding:11, fontSize:14, fontWeight:700, cursor:"pointer" }}>
+                      ลบถาวร
+                    </button>
+                  </div>
+                </div>
+              </Modal>
+            );
+          })()}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
